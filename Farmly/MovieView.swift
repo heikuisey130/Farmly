@@ -1,153 +1,364 @@
+// MovieView.swift
+
 import SwiftUI
 
-// --- 1. 数据模型 (Data Model) ---
-// 我们创建一个自定义的 Movie 结构体，用来存放一部电影的多个信息。
-// - Identifiable: 能让 SwiftUI 在列表中唯一识别每个元素。
-// - Codable: 能让我们轻松地把从网上下载的JSON数据自动转换成这个结构体。
+struct MovieView: View {
+    private let apiKey = "98d8f2af5358cfadfa95d2784e0a58db"
+    let selectedGenreIDs: Set<Int>
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var allMovies: [Movie] = []
+    @State private var currentMovie: Movie?
+    @State private var statusMessage = "正在加载电影..."
+    
+    @State private var preloadedMovie: Movie?
+    
+    @State private var isFlipped = false
+    @State private var detailedMovie: MovieDetail?
+    @State private var isFetchingDetails = false
+
+    var body: some View {
+        VStack(spacing: 15) {
+            Text("为你推荐")
+                .font(.largeTitle).fontWeight(.bold)
+                .padding(.top)
+
+            ZStack {
+                if let movie = currentMovie {
+                    FlippableCardView(
+                        movie: movie,
+                        detailedMovie: detailedMovie,
+                        isFlipped: $isFlipped,
+                        isFetchingDetails: isFetchingDetails
+                    )
+                    // --- 1. 将 onTapGesture 的调用改为异步任务 <-- ---
+                    .onTapGesture {
+                        Task {
+                            await handleFlip(for: movie.id)
+                        }
+                    }
+                    .scaleEffect(0.85)
+                    .transition(.scale(scale: 0.8, anchor: .center).combined(with: .opacity))
+                    .id(movie.id)
+                    .animation(.spring(response: 0.4, dampingFraction: 0.7), value: currentMovie?.id)
+                    
+                } else {
+                    Text(statusMessage)
+                        .font(.title2)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                }
+            }
+            .frame(height: 450)
+            .padding(.top, 20)
+
+            Spacer()
+
+            HStack(spacing: 20) {
+                Button(action: markAsWatchedAndRecommendNext) {
+                    Label("我看过了", systemImage: "eye.slash.fill")
+                }
+                .font(.headline).padding().frame(maxWidth: .infinity)
+                .background(Color.green).foregroundColor(.white).cornerRadius(15)
+                .disabled(currentMovie == nil)
+
+                Button("换一部推荐") {
+                    recommendNextMovie()
+                }
+                .font(.headline).padding().frame(maxWidth: .infinity)
+                .background(Color.blue).foregroundColor(.white).cornerRadius(15)
+                .disabled(allMovies.count <= 1 && currentMovie != nil)
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
+        }
+        .task { await fetchMovies(for: selectedGenreIDs) }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button(action: { dismiss() }) { Label("重新选择", systemImage: "chevron.left") }
+            }
+        }
+    }
+    
+    // --- 2. 重写 handleFlip 函数，实现“先加载，再翻转” <-- ---
+    func handleFlip(for movieID: Int) async {
+        // 如果卡片已经是翻转状态，直接执行翻转动画回去
+        if isFlipped {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                isFlipped = false
+            }
+            return
+        }
+        
+        // 如果是翻向背面
+        // 检查是否已经加载过这份详情，如果加载过，直接翻转
+        if detailedMovie?.id == movieID {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                isFlipped = true
+            }
+            return
+        }
+        
+        // 如果没有加载过，则先开始加载
+        isFetchingDetails = true
+        self.detailedMovie = await fetchMovieDetails(for: movieID)
+        isFetchingDetails = false
+        
+        // 当加载结束后（无论成功失败），再执行翻转动画
+        if self.detailedMovie != nil {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                isFlipped = true
+            }
+        }
+    }
+    
+    func fetchMovieDetails(for movieID: Int) async -> MovieDetail? {
+        let urlString = "https://api.themoviedb.org/3/movie/\(movieID)?api_key=\(apiKey)&language=zh-CN&append_to_response=credits"
+        guard let url = URL(string: urlString) else { return nil }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(MovieDetail.self, from: data)
+        } catch {
+            print("获取详情失败: \(error)")
+            return nil
+        }
+    }
+
+    func markAsWatchedAndRecommendNext() {
+        guard let movieToWatch = currentMovie else { return }
+        WatchedList.add(movieID: movieToWatch.id)
+        allMovies.removeAll { $0.id == movieToWatch.id }
+        recommendNextMovie()
+    }
+    
+    func recommendNextMovie() {
+        isFlipped = false
+        detailedMovie = nil
+        
+        let movieToShow = preloadedMovie
+        
+        let potentialNextMovies = allMovies.filter { $0.id != movieToShow?.id }
+        preloadedMovie = potentialNextMovies.randomElement()
+        
+        if movieToShow != nil {
+            currentMovie = movieToShow
+            Task {
+                await ImagePrefetcher.prefetch(url: preloadedMovie?.posterURL)
+            }
+        } else {
+            currentMovie = nil
+            statusMessage = "该类型下已没有可推荐的电影了"
+        }
+    }
+    
+    func fetchMovies(for genreIDs: Set<Int>) async {
+        let watchedIDs = WatchedList.getIDs()
+        var urlString: String
+        if genreIDs.isEmpty {
+            urlString = "https://api.themoviedb.org/3/movie/popular?api_key=\(apiKey)&language=zh-CN"
+        } else {
+            let genreIDString = genreIDs.map(String.init).joined(separator: ",")
+            urlString = "https://api.themoviedb.org/3/discover/movie?api_key=\(apiKey)&language=zh-CN&with_genres=\(genreIDString)"
+        }
+        guard let url = URL(string: urlString) else { return }
+        do {
+            var fetchedMovies = [Movie]()
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let response = try decoder.decode(MovieResponse.self, from: data)
+            fetchedMovies = response.results.filter { !watchedIDs.contains($0.id) && $0.posterPath != nil }
+            
+            guard !fetchedMovies.isEmpty else {
+                statusMessage = "该类型下已没有可推荐的电影了"; currentMovie = nil; preloadedMovie = nil; allMovies = []; return
+            }
+            
+            allMovies = fetchedMovies
+            currentMovie = allMovies.removeFirst()
+            preloadedMovie = allMovies.first
+            
+            Task {
+                await ImagePrefetcher.prefetch(url: preloadedMovie?.posterURL)
+            }
+            
+        } catch {
+            statusMessage = "加载失败: \(error.localizedDescription)"
+        }
+    }
+}
+
+// --- 3. 修改 FlippableCardView，在正面增加加载指示器 <-- ---
+struct FlippableCardView: View {
+    let movie: Movie
+    let detailedMovie: MovieDetail?
+    @Binding var isFlipped: Bool
+    let isFetchingDetails: Bool
+    
+    var body: some View {
+        ZStack {
+            CardFaceView(movie: movie, detailedMovie: detailedMovie, isFetchingDetails: isFetchingDetails)
+                .opacity(isFlipped ? 1.0 : 0.0)
+                .rotation3DEffect(.degrees(isFlipped ? 0 : 180), axis: (x: 0, y: 1, z: 0))
+
+            // 将海报和加载圈放在一个 ZStack 里
+            ZStack {
+                CachedAsyncImage(url: movie.posterURL) { image in
+                    image
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } placeholder: {
+                    ProgressView()
+                }
+                
+                // 如果正在获取详情，就在海报上叠加一个半透明的加载指示
+                if isFetchingDetails {
+                    Color.black.opacity(0.4)
+                    ProgressView().tint(.white)
+                }
+            }
+            .cornerRadius(15).shadow(radius: 10)
+            .opacity(isFlipped ? 0.0 : 1.0)
+            .rotation3DEffect(.degrees(isFlipped ? -180 : 0), axis: (x: 0, y: 1, z: 0))
+        }
+    }
+}
+
+struct CardFaceView: View {
+    let movie: Movie
+    let detailedMovie: MovieDetail?
+    let isFetchingDetails: Bool
+
+    var body: some View {
+        ZStack {
+            CachedAsyncImage(url: movie.posterURL) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.gray
+            }
+            .blur(radius: 30, opaque: true)
+            .overlay(.black.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 15))
+            .shadow(radius: 10)
+            
+            // 这里的内容现在只会在加载完成后才显示
+            if let detail = detailedMovie {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(detail.title).font(.largeTitle).fontWeight(.black)
+                        
+                        if let tagline = detail.tagline, !tagline.isEmpty {
+                            Text("\"\(tagline)\"")
+                                .font(.headline).fontWeight(.light).italic()
+                        }
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        Text(detail.overview ?? "暂无简介。").font(.body).lineSpacing(5)
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        VStack(alignment: .leading, spacing: 12) {
+                            InfoRowView(icon: "calendar", label: "上映日期", value: detail.releaseDate ?? "未知")
+                            InfoRowView(icon: "clock", label: "片长", value: detail.runtime != nil ? "\(detail.runtime!) 分钟" : "未知")
+                            InfoRowView(icon: "globe.asia.australia.fill", label: "国家", value: detail.productionCountries?.map(\.name).joined(separator: ", ") ?? "未知")
+                        }
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        Text("主要演员").font(.title3).fontWeight(.bold)
+                        
+                        Text(detail.credits.cast.prefix(5).map(\.name).joined(separator: " / "))
+                            .font(.subheadline).fontWeight(.light)
+                        
+                    }
+                    .padding(25)
+                }
+            }
+            // 注意：我们不再需要在CardFaceView里处理加载状态了，
+            // 因为只有加载完成后，卡片才会翻转过来看到它。
+        }
+        .foregroundColor(.white)
+        .shadow(radius: 2)
+    }
+}
+
+struct InfoRowView: View {
+    let icon: String
+    let label: String
+    let value: String
+    
+    var body: some View {
+        HStack(alignment: .top) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .frame(width: 25, alignment: .center)
+            
+            Text(label)
+                .font(.subheadline).bold()
+                .frame(width: 70, alignment: .leading)
+            
+            Text(value)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct WatchedList {
+    private static let userDefaultsKey = "watchedMovieIDs"
+    static func getIDs() -> Set<Int> {
+        let defaults = UserDefaults.standard
+        let array = defaults.array(forKey: userDefaultsKey) as? [Int] ?? []
+        return Set(array)
+    }
+    static func add(movieID: Int) {
+        let defaults = UserDefaults.standard
+        var currentSet = getIDs()
+        currentSet.insert(movieID)
+        defaults.set(Array(currentSet), forKey: userDefaultsKey)
+    }
+}
+
 struct Movie: Identifiable, Codable {
     let id: Int
     let title: String
-    let posterPath: String? // 海报路径，API返回的可能为空，所以是可选类型
-
-    // 为了方便，我们创建一个计算属性来直接生成完整的海报URL
+    let posterPath: String?
     var posterURL: URL? {
         if let path = posterPath {
-            // TMDB的图片基础URL + 图片尺寸(w500是中等大小) + 具体的图片路径
             return URL(string: "https://image.tmdb.org/t/p/w500\(path)")
         }
         return nil
     }
 }
 
-// 这个结构体用来匹配 TMDB API 返回的JSON的整体结构
-// API返回的不是一个电影列表，而是一个包含"results"字段的对象，"results"里才是电影列表
 struct MovieResponse: Codable {
     let results: [Movie]
 }
 
-
-// --- 2. 界面视图 (View) ---
-struct ContentView: View {
-    
-    // 你的TMDB API密钥，请在这里粘贴
-    private let apiKey = "98d8f2af5358cfadfa95d2784e0a58db"
-    
-    // 用来存储从API获取到的所有电影
-    @State private var allMovies: [Movie] = []
-    
-    // 用来存储当前界面上正在推荐的电影
-    @State private var currentMovie: Movie?
-    
-    // 用来显示加载状态或错误信息
-    @State private var statusMessage = "正在加载热门电影..."
-
-    var body: some View {
-        VStack(spacing: 20) {
-            
-            Text("今日推荐")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-                .padding(.top)
-
-            // --- 图片显示区域 ---
-            // 如果 currentMovie 有值，就显示电影信息
-            if let movie = currentMovie {
-                // AsyncImage 是专门用来从URL异步加载并显示图片的视图
-                AsyncImage(url: movie.posterURL) { image in
-                    // 图片加载成功后，我们对图片进行一些修饰
-                    image
-                        .resizable() // 允许图片缩放
-                        .aspectRatio(contentMode: .fit) // 保持宽高比填充
-                        .cornerRadius(15) // 设置圆角
-                        .shadow(radius: 10) // 添加阴影
-                } placeholder: {
-                    // 在图片正式加载完成前，显示一个占位符
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 15)
-                            .fill(Color.gray.opacity(0.3))
-                        ProgressView() // 显示一个加载中的圈圈
-                    }
-                }
-                .frame(height: 400) // 给图片区域一个固定的高度
-
-                Text(movie.title)
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                    .multilineTextAlignment(.center)
-
-            } else {
-                // 如果 currentMovie 为空（初始状态），就显示状态信息
-                Spacer()
-                Text(statusMessage)
-                    .font(.title2)
-                Spacer()
-            }
-
-            // --- 按钮区域 ---
-            Button("推荐下一部") {
-                recommendRandomMovie()
-            }
-            .font(.headline)
-            .padding()
-            .background(Color.blue)
-            .foregroundColor(.white)
-            .cornerRadius(10)
-            // 如果电影列表还没加载好，按钮就不能点击
-            .disabled(allMovies.isEmpty)
-        }
-        .padding()
-        // .task 是一个修饰符，它会在视图出现时，自动执行里面的异步任务
-        // 非常适合用来在界面一加载时就去请求网络数据
-        .task {
-            await fetchMovies()
-        }
-    }
-    
-    // --- 3. 核心功能 (Core Logic) ---
-    
-    // 异步功能：从TMDB的API获取热门电影数据
-    func fetchMovies() async {
-        // 1. 准备URL
-        let urlString = "https://api.themoviedb.org/3/movie/popular?api_key=\(apiKey)&language=zh-CN&page=1"
-        guard let url = URL(string: urlString) else {
-            statusMessage = "错误：无法创建URL"
-            return
-        }
-        
-        // 2. 发起网络请求
-        do {
-            // `URLSession.shared.data(from: url)` 是一个异步操作，我们用 await 来等待它完成
-            let (data, _) = try await URLSession.shared.data(from: url)
-            
-            // 3. 解析JSON数据
-            let decoder = JSONDecoder()
-            // API返回的字段是下划线命名(poster_path)，Swift是驼峰命名(posterPath)，设置这个策略可以自动转换
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            let response = try decoder.decode(MovieResponse.self, from: data)
-            
-            // 4. 更新状态
-            allMovies = response.results
-            statusMessage = "点击按钮开始推荐"
-            // 获取成功后，立刻推荐第一部电影
-            recommendRandomMovie()
-            
-        } catch {
-            // 如果中间任何一步出错，就在界面上显示错误信息
-            statusMessage = "加载失败: \(error.localizedDescription)"
-        }
-    }
-    
-    // 同步功能：从已下载的电影列表中随机选一部
-    func recommendRandomMovie() {
-        // `randomElement()` 从数组中随机取一个元素
-        currentMovie = allMovies.randomElement()
-    }
+struct MovieDetail: Identifiable, Codable {
+    let id: Int
+    let title: String
+    let overview: String?
+    let releaseDate: String?
+    let runtime: Int?
+    let tagline: String?
+    let productionCountries: [ProductionCountry]?
+    let credits: Credits
 }
 
+struct ProductionCountry: Identifiable, Codable {
+    var id: String { name }
+    let name: String
+}
 
-// --- 预览代码 ---
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
-    }
+struct Credits: Codable {
+    let cast: [CastMember]
+}
+
+struct CastMember: Identifiable, Codable {
+    let id: Int
+    let name: String
+    let character: String?
 }
