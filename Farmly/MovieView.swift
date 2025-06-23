@@ -36,7 +36,9 @@ struct MovieView: View {
                         }
                     }
                     .scaleEffect(0.85)
-                    .transition(.scale(scale: 0.8, anchor: .center).combined(with: .opacity))
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)))
                     .id(movie.id)
                     .animation(.spring(response: 0.4, dampingFraction: 0.7), value: currentMovie?.id)
                     
@@ -280,66 +282,6 @@ struct FlippableCardView: View {
     }
 }
 
-struct CardFaceView: View {
-    let movie: Movie
-    let detailedMovie: MovieDetail?
-    let isFetchingDetails: Bool
-
-    var body: some View {
-        ZStack {
-            CachedAsyncImage(url: movie.posterURL) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Color.gray
-            }
-            .blur(radius: 30, opaque: true)
-            .overlay(.black.opacity(0.4))
-            .clipShape(RoundedRectangle(cornerRadius: 15))
-            .shadow(radius: 10)
-            
-            if isFetchingDetails {
-                ProgressView().tint(.white)
-            } else if let detail = detailedMovie {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text(detail.title).font(.largeTitle).fontWeight(.black)
-                        
-                        if let tagline = detail.tagline, !tagline.isEmpty {
-                            Text("\"\(tagline)\"")
-                                .font(.headline).fontWeight(.light).italic()
-                        }
-                        
-                        Divider().overlay(.white.opacity(0.5))
-                        
-                        Text(detail.overview ?? "暂无简介。").font(.body).lineSpacing(5)
-                        
-                        Divider().overlay(.white.opacity(0.5))
-                        
-                        VStack(alignment: .leading, spacing: 12) {
-                            InfoRowView(icon: "calendar", label: "上映日期", value: detail.releaseDate ?? "未知")
-                            InfoRowView(icon: "clock", label: "片长", value: detail.runtime != nil ? "\(detail.runtime!) 分钟" : "未知")
-                            InfoRowView(icon: "globe.asia.australia.fill", label: "国家", value: detail.productionCountries?.map(\.name).joined(separator: ", ") ?? "未知")
-                        }
-                        
-                        Divider().overlay(.white.opacity(0.5))
-                        
-                        Text("主要演员").font(.title3).fontWeight(.bold)
-                        
-                        Text(detail.credits.cast.prefix(5).map(\.name).joined(separator: " / "))
-                            .font(.subheadline).fontWeight(.light)
-                        
-                    }
-                    .padding(25)
-                }
-            } else {
-                Text("无法加载电影详情").font(.headline)
-            }
-        }
-        .foregroundColor(.white)
-        .shadow(radius: 2)
-    }
-}
-
 struct InfoRowView: View {
     let icon: String
     let label: String
@@ -404,6 +346,8 @@ struct MovieDetail: Identifiable, Codable {
     let releaseDate: String?
     let runtime: Int?
     let tagline: String?
+    let voteAverage: Double? // 平均分
+    let voteCount: Int? // 评分人数
     let productionCountries: [ProductionCountry]?
     let credits: Credits
 }
@@ -421,4 +365,93 @@ struct CastMember: Identifiable, Codable {
     let id: Int
     let name: String
     let character: String?
+}
+struct CardFaceView: View {
+    let movie: Movie
+    let detailedMovie: MovieDetail?
+    let isFetchingDetails: Bool
+
+    var body: some View {
+        ZStack {
+            CachedAsyncImage(url: movie.posterURL) { image in
+                image.resizable().aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.gray
+            }
+            .blur(radius: 30, opaque: true)
+            .overlay(.black.opacity(0.4))
+            .clipShape(RoundedRectangle(cornerRadius: 15))
+            .shadow(radius: 10)
+            
+            if isFetchingDetails {
+                ProgressView().tint(.white)
+            } else if let detail = detailedMovie {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(detail.title).font(.largeTitle).fontWeight(.black)
+                        
+                        if let tagline = detail.tagline, !tagline.isEmpty {
+                            Text("\"\(tagline)\"")
+                                .font(.headline).fontWeight(.light).italic()
+                        }
+                        
+                        // --- 在这里增加评分区域 ---
+                        VStack(alignment: .leading) {
+                            Text("综合评分").font(.headline).bold()
+                            HStack(spacing: 10) {
+                                StarRatingView(rating: detail.voteAverage ?? 0)
+                                Text(String(format: "%.1f / 10", detail.voteAverage ?? 0))
+                                    .font(.title2).bold()
+                                Text("(\(detail.voteCount ?? 0)人评价)")
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        Text(detail.overview ?? "暂无简介。").font(.body).lineSpacing(5)
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        VStack(alignment: .leading, spacing: 12) {
+                            InfoRowView(icon: "calendar", label: "上映日期", value: detail.releaseDate ?? "未知")
+                            InfoRowView(icon: "clock", label: "片长", value: detail.runtime != nil ? "\(detail.runtime!) 分钟" : "未知")
+                            InfoRowView(icon: "globe.asia.australia.fill", label: "国家", value: detail.productionCountries?.map(\.name).joined(separator: ", ") ?? "未知")
+                        }
+                        
+                        Divider().overlay(.white.opacity(0.5))
+                        
+                        Text("主要演员").font(.title3).fontWeight(.bold)
+                        
+                        Text(detail.credits.cast.prefix(5).map(\.name).joined(separator: " / "))
+                            .font(.subheadline).fontWeight(.light)
+                        
+                    }
+                    .padding(25)
+                }
+            } else {
+                Text("无法加载电影详情").font(.headline)
+            }
+        }
+        .foregroundColor(.white)
+        .shadow(radius: 2)
+    }
+}
+
+// --- 2. 新增一个独立的“星星评分”视图 <-- ---
+struct StarRatingView: View {
+    let rating: Double // 传入的评分是10分制
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            // 将10分制转换为5星制
+            let starCount = round(rating / 2)
+            
+            ForEach(1...5, id: \.self) { index in
+                Image(systemName: "star.fill")
+                    .foregroundColor(Double(index) <= starCount ? .yellow : .gray.opacity(0.5))
+            }
+        }
+        .font(.title3)
+    }
 }
