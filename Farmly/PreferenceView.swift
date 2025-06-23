@@ -2,99 +2,118 @@
 
 import SwiftUI
 
+enum RecommendationSource: Hashable {
+    case tmdbGenres(ids: Set<Int>)
+    case doubanTop250
+}
+
 struct PreferenceView: View {
-    // 你的TMDB API密钥
     private let apiKey = "98d8f2af5358cfadfa95d2784e0a58db"
 
     @State private var genres: [Genre] = []
     @State private var statusMessage = "正在加载电影类型..."
     
-    // --- 新增状态 ---
-    // 1. 使用 Set 来存储多个已选中的类型ID，Set可以自动处理重复问题
     @State private var selectedGenreIDs: Set<Int> = []
-    // 2. 一个布尔值，用来触发导航到下一个页面
-    @State private var navigateToMovies = false
+    @State private var path = NavigationPath()
 
-    // --- 界面美化：定义网格布局 ---
-    // 创建一个自适应的网格，每列最小宽度150，SwiftUI会自动计算一行能放几列
-    let columns: [GridItem] = [
-        GridItem(.adaptive(minimum: 150))
-    ]
+    let columns: [GridItem] = [ GridItem(.adaptive(minimum: 150)) ]
 
     var body: some View {
-        // NavigationStack 是实现页面跳转的关键
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack {
-                // --- 标题 ---
                 Text("想看点什么？")
                     .font(.largeTitle).fontWeight(.bold)
-                Text("可多选，或直接点击下方按钮随机推荐")
-                    .font(.subheadline)
-                    .foregroundColor(.gray)
+                Text("可选择豆瓣Top250，或多选下方类型")
+                    .font(.subheadline).foregroundColor(.gray)
                     .padding(.bottom)
 
-                // --- 网格区域 ---
                 if genres.isEmpty {
-                    ProgressView().padding()
-                    Text(statusMessage)
+                    ProgressView().padding(); Text(statusMessage)
                 } else {
-                    // 使用 ScrollView + LazyVGrid 来创建可滚动的网格
                     ScrollView {
+                        Text("精选列表")
+                            .font(.title2).bold().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+                        
+                        doubanTop250Button
+                            .padding(.horizontal)
+
+                        Divider().padding(.vertical)
+                        
+                        Text("按类型筛选")
+                            .font(.title2).bold().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
+
                         LazyVGrid(columns: columns, spacing: 20) {
                             ForEach(genres) { genre in
                                 GenreCardView(genre: genre, isSelected: selectedGenreIDs.contains(genre.id))
-                                    .onTapGesture {
-                                        // --- 多选逻辑 ---
-                                        toggleSelection(for: genre)
-                                    }
+                                    .onTapGesture { toggleGenreSelection(for: genre) }
                             }
                         }
-                        .padding()
+                        .padding(.horizontal)
                     }
                 }
                 
                 Spacer()
 
-                // --- 确认按钮 ---
                 Button(action: {
-                    // 点击按钮时，触发导航状态
-                    navigateToMovies = true
+                    // --- ✨ 在这里加入打印指令，追踪我们发送的数据 <-- ---
+                    print("🅿️ PreferenceView: 即将导航，发送的类型ID为: \(selectedGenreIDs)")
+                    
+                    let genreSelection = RecommendationSource.tmdbGenres(ids: selectedGenreIDs)
+                    path.append(genreSelection)
                 }) {
-                    // 使用 Label 可以同时展示图标和文字
-                    Label("我选好了，开始推荐！", systemImage: "sparkles")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding()
+                    Label("按类型推荐", systemImage: "sparkles")
+                        .font(.headline).foregroundColor(.white).padding()
                         .frame(maxWidth: .infinity)
                         .background(Color.blue)
                         .cornerRadius(15)
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.bottom, 5)
             }
-            .task {
-                await fetchGenres()
+            .task { await fetchGenres() }
+            .navigationDestination(for: RecommendationSource.self) { source in
+                MovieView(source: source)
             }
-            // --- 导航目标 ---
-            // 当 `MapsToMovies` 变为 true 时，自动跳转到 MovieView
-            .navigationDestination(isPresented: $navigateToMovies) {
-                // 把用户选择的类型ID集合传递给下一个页面
-                MovieView(selectedGenreIDs: selectedGenreIDs)
-            }
+            .navigationTitle("偏好选择")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
-
-    // --- 功能函数 ---
     
-    func toggleSelection(for genre: Genre) {
+    private var doubanTop250Button: some View {
+        Button(action: {
+            path.append(RecommendationSource.doubanTop250)
+        }) {
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("豆瓣 Top 250")
+                        .font(.headline).fontWeight(.heavy)
+                    Text("来自所有影迷的终极选择")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "crown.fill")
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(Color.yellow.opacity(0.2))
+            .cornerRadius(15)
+            .overlay(
+                RoundedRectangle(cornerRadius: 15)
+                    .stroke(.yellow, lineWidth: 2)
+            )
+        }
+        .tint(.primary)
+    }
+    
+    func toggleGenreSelection(for genre: Genre) {
         if selectedGenreIDs.contains(genre.id) {
-            selectedGenreIDs.remove(genre.id) // 如果已选中，就取消选中
+            selectedGenreIDs.remove(genre.id)
         } else {
-            selectedGenreIDs.insert(genre.id) // 如果未选中，就加入选中集合
+            selectedGenreIDs.insert(genre.id)
         }
     }
 
     func fetchGenres() async {
-        // ... (获取类型的函数和之前一样，无需改动)
         let urlString = "https://api.themoviedb.org/3/genre/movie/list?api_key=\(apiKey)&language=zh-CN"
         guard let url = URL(string: urlString) else { return }
         do {
@@ -107,7 +126,7 @@ struct PreferenceView: View {
     }
 }
 
-// --- 界面美化：为类型创建一个单独的卡片视图 ---
+
 struct GenreCardView: View {
     let genre: Genre
     let isSelected: Bool
@@ -121,17 +140,14 @@ struct GenreCardView: View {
             .background(isSelected ? Color.blue : Color.gray.opacity(0.2))
             .cornerRadius(15)
             .overlay(
-                // 如果选中，显示一个边框
                 RoundedRectangle(cornerRadius: 15)
                     .stroke(isSelected ? .blue.opacity(0.5) : .clear, lineWidth: 2)
             )
-            .scaleEffect(isSelected ? 1.05 : 1.0) // 选中时稍微放大
-            .animation(.spring(), value: isSelected) // 添加灵动的动画
+            .scaleEffect(isSelected ? 1.05 : 1.0)
+            .animation(.spring(), value: isSelected)
     }
 }
 
-
-// --- 数据模型 (和之前一样) ---
 struct Genre: Identifiable, Codable {
     let id: Int
     let name: String

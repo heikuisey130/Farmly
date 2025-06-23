@@ -4,7 +4,7 @@ import SwiftUI
 
 struct MovieView: View {
     private let apiKey = "98d8f2af5358cfadfa95d2784e0a58db"
-    let selectedGenreIDs: Set<Int>
+    let source: RecommendationSource
     @Environment(\.dismiss) private var dismiss
     
     @State private var allMovies: [Movie] = []
@@ -12,7 +12,6 @@ struct MovieView: View {
     @State private var statusMessage = "正在加载电影..."
     
     @State private var preloadedMovie: Movie?
-    
     @State private var isFlipped = false
     @State private var detailedMovie: MovieDetail?
     @State private var isFetchingDetails = false
@@ -31,7 +30,6 @@ struct MovieView: View {
                         isFlipped: $isFlipped,
                         isFetchingDetails: isFetchingDetails
                     )
-                    // --- 1. 将 onTapGesture 的调用改为异步任务 <-- ---
                     .onTapGesture {
                         Task {
                             await handleFlip(for: movie.id)
@@ -72,7 +70,9 @@ struct MovieView: View {
             .padding(.horizontal)
             .padding(.bottom)
         }
-        .task { await fetchMovies(for: selectedGenreIDs) }
+        .task {
+            await fetchMovies()
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button(action: { dismiss() }) { Label("重新选择", systemImage: "chevron.left") }
@@ -80,35 +80,20 @@ struct MovieView: View {
         }
     }
     
-    // --- 2. 重写 handleFlip 函数，实现“先加载，再翻转” <-- ---
     func handleFlip(for movieID: Int) async {
-        // 如果卡片已经是翻转状态，直接执行翻转动画回去
         if isFlipped {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
-                isFlipped = false
-            }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) { isFlipped = false }
             return
         }
-        
-        // 如果是翻向背面
-        // 检查是否已经加载过这份详情，如果加载过，直接翻转
         if detailedMovie?.id == movieID {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
-                isFlipped = true
-            }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) { isFlipped = true }
             return
         }
-        
-        // 如果没有加载过，则先开始加载
         isFetchingDetails = true
         self.detailedMovie = await fetchMovieDetails(for: movieID)
         isFetchingDetails = false
-        
-        // 当加载结束后（无论成功失败），再执行翻转动画
         if self.detailedMovie != nil {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
-                isFlipped = true
-            }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) { isFlipped = true }
         }
     }
     
@@ -136,12 +121,9 @@ struct MovieView: View {
     func recommendNextMovie() {
         isFlipped = false
         detailedMovie = nil
-        
         let movieToShow = preloadedMovie
-        
         let potentialNextMovies = allMovies.filter { $0.id != movieToShow?.id }
         preloadedMovie = potentialNextMovies.randomElement()
-        
         if movieToShow != nil {
             currentMovie = movieToShow
             Task {
@@ -153,8 +135,35 @@ struct MovieView: View {
         }
     }
     
-    func fetchMovies(for genreIDs: Set<Int>) async {
+    func fetchMovies() async {
         let watchedIDs = WatchedList.getIDs()
+        var fetchedMovies: [Movie] = []
+
+        switch source {
+        case .tmdbGenres(let genreIDs):
+            fetchedMovies = await fetchMoviesFromTMDB(for: genreIDs, watchedIDs: watchedIDs)
+            
+        case .doubanTop250:
+            statusMessage = "正在加载豆瓣Top250..."
+            fetchedMovies = await fetchMoviesFromDoubanCSV(watchedIDs: watchedIDs)
+        }
+        
+        allMovies = fetchedMovies
+        
+        guard !allMovies.isEmpty else {
+            statusMessage = "该来源下已没有可推荐的电影了"; currentMovie = nil; preloadedMovie = nil; allMovies = []; return
+        }
+        
+        currentMovie = allMovies.removeFirst()
+        preloadedMovie = allMovies.first
+        
+        Task {
+            await ImagePrefetcher.prefetch(url: preloadedMovie?.posterURL)
+        }
+    }
+
+    // --- ✨ 修正在这里！✨ ---
+    func fetchMoviesFromTMDB(for genreIDs: Set<Int>, watchedIDs: Set<Int>) async -> [Movie] {
         var urlString: String
         if genreIDs.isEmpty {
             urlString = "https://api.themoviedb.org/3/movie/popular?api_key=\(apiKey)&language=zh-CN"
@@ -162,34 +171,89 @@ struct MovieView: View {
             let genreIDString = genreIDs.map(String.init).joined(separator: ",")
             urlString = "https://api.themoviedb.org/3/discover/movie?api_key=\(apiKey)&language=zh-CN&with_genres=\(genreIDString)"
         }
-        guard let url = URL(string: urlString) else { return }
+        guard let url = URL(string: urlString) else { return [] }
         do {
-            var fetchedMovies = [Movie]()
+            let (data, _) = try await URLSession.shared.data(from: url)
+            
+            // 创建解码器
+            let decoder = JSONDecoder()
+            // 告诉解码器如何处理命名不一致的问题（我之前漏掉了这句）
+            decoder.keyDecodingStrategy = .convertFromSnakeCase // <-- 补上这句关键代码
+            
+            // 现在可以正常解码了
+            let response = try decoder.decode(MovieResponse.self, from: data)
+            
+            return response.results.filter { !watchedIDs.contains($0.id) && $0.posterPath != nil }
+        } catch {
+            // 在控制台打印详细的解码错误，方便以后调试
+            print("🚨 TMDB 数据解析失败: \(error)")
+            DispatchQueue.main.async { statusMessage = "加载失败: \(error.localizedDescription)" }
+            return []
+        }
+    }
+    
+    func fetchMoviesFromDoubanCSV(watchedIDs: Set<Int>) async -> [Movie] {
+        let localMovies = loadTitlesFromCSV()
+        var movies: [Movie] = []
+        await withTaskGroup(of: Movie?.self) { group in
+            for localMovie in localMovies {
+                group.addTask {
+                    return await self.searchMovieOnTMDB(for: localMovie.title, year: localMovie.year)
+                }
+            }
+            for await movie in group {
+                if let movie = movie, !watchedIDs.contains(movie.id), movie.posterPath != nil {
+                    movies.append(movie)
+                }
+            }
+        }
+        return movies
+    }
+
+    func loadTitlesFromCSV() -> [(title: String, year: String)] {
+        guard let filepath = Bundle.main.path(forResource: "top250_movie", ofType: "csv") else {
+            print("错误：在项目中找不到 top250_movie.csv 文件。")
+            return []
+        }
+        do {
+            let contents = try String(contentsOfFile: filepath, encoding: .utf8)
+            let lines = contents.split(separator: "\n").dropFirst()
+            var movies = [(title: String, year: String)]()
+            
+            for line in lines {
+                let columns = line.split(separator: ",", maxSplits: 2).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                
+                // 1. 根据你的数据格式，将判断条件从 2 改为 3
+                if columns.count >= 3 {
+                    // 2. 根据你的要求，同步为从第2列和第3列获取数据
+                    let title = columns[1]
+                    let year = columns[2]
+                    movies.append((title: title, year: year))
+                }
+            }
+            return movies
+        } catch {
+            print("错误：读取CSV文件失败 - \(error)")
+            return []
+        }
+    }
+
+    func searchMovieOnTMDB(for title: String, year: String) async -> Movie? {
+        guard let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        let urlString = "https://api.themoviedb.org/3/search/movie?api_key=\(apiKey)&language=zh-CN&query=\(encodedTitle)&primary_release_year=\(year)"
+        guard let url = URL(string: urlString) else { return nil }
+        do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let response = try decoder.decode(MovieResponse.self, from: data)
-            fetchedMovies = response.results.filter { !watchedIDs.contains($0.id) && $0.posterPath != nil }
-            
-            guard !fetchedMovies.isEmpty else {
-                statusMessage = "该类型下已没有可推荐的电影了"; currentMovie = nil; preloadedMovie = nil; allMovies = []; return
-            }
-            
-            allMovies = fetchedMovies
-            currentMovie = allMovies.removeFirst()
-            preloadedMovie = allMovies.first
-            
-            Task {
-                await ImagePrefetcher.prefetch(url: preloadedMovie?.posterURL)
-            }
-            
+            return response.results.first
         } catch {
-            statusMessage = "加载失败: \(error.localizedDescription)"
+            return nil
         }
     }
 }
 
-// --- 3. 修改 FlippableCardView，在正面增加加载指示器 <-- ---
 struct FlippableCardView: View {
     let movie: Movie
     let detailedMovie: MovieDetail?
@@ -202,21 +266,12 @@ struct FlippableCardView: View {
                 .opacity(isFlipped ? 1.0 : 0.0)
                 .rotation3DEffect(.degrees(isFlipped ? 0 : 180), axis: (x: 0, y: 1, z: 0))
 
-            // 将海报和加载圈放在一个 ZStack 里
-            ZStack {
-                CachedAsyncImage(url: movie.posterURL) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                } placeholder: {
-                    ProgressView()
-                }
-                
-                // 如果正在获取详情，就在海报上叠加一个半透明的加载指示
-                if isFetchingDetails {
-                    Color.black.opacity(0.4)
-                    ProgressView().tint(.white)
-                }
+            CachedAsyncImage(url: movie.posterURL) { image in
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } placeholder: {
+                ProgressView()
             }
             .cornerRadius(15).shadow(radius: 10)
             .opacity(isFlipped ? 0.0 : 1.0)
@@ -242,8 +297,9 @@ struct CardFaceView: View {
             .clipShape(RoundedRectangle(cornerRadius: 15))
             .shadow(radius: 10)
             
-            // 这里的内容现在只会在加载完成后才显示
-            if let detail = detailedMovie {
+            if isFetchingDetails {
+                ProgressView().tint(.white)
+            } else if let detail = detailedMovie {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 16) {
                         Text(detail.title).font(.largeTitle).fontWeight(.black)
@@ -275,9 +331,9 @@ struct CardFaceView: View {
                     }
                     .padding(25)
                 }
+            } else {
+                Text("无法加载电影详情").font(.headline)
             }
-            // 注意：我们不再需要在CardFaceView里处理加载状态了，
-            // 因为只有加载完成后，卡片才会翻转过来看到它。
         }
         .foregroundColor(.white)
         .shadow(radius: 2)
@@ -318,6 +374,10 @@ struct WatchedList {
         var currentSet = getIDs()
         currentSet.insert(movieID)
         defaults.set(Array(currentSet), forKey: userDefaultsKey)
+    }
+    static func clear() {
+        print("🧹 正在清除所有‘我看过了’的记录...")
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
     }
 }
 
