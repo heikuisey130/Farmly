@@ -38,7 +38,8 @@ struct MovieView: View {
                     .scaleEffect(0.85)
                     .transition(.asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)))
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
                     .id(movie.id)
                     .animation(.spring(response: 0.4, dampingFraction: 0.7), value: currentMovie?.id)
                     
@@ -144,7 +145,6 @@ struct MovieView: View {
         switch source {
         case .tmdbGenres(let genreIDs):
             fetchedMovies = await fetchMoviesFromTMDB(for: genreIDs, watchedIDs: watchedIDs)
-            
         case .doubanTop250:
             statusMessage = "正在加载豆瓣Top250..."
             fetchedMovies = await fetchMoviesFromDoubanCSV(watchedIDs: watchedIDs)
@@ -164,7 +164,6 @@ struct MovieView: View {
         }
     }
 
-    // --- ✨ 修正在这里！✨ ---
     func fetchMoviesFromTMDB(for genreIDs: Set<Int>, watchedIDs: Set<Int>) async -> [Movie] {
         var urlString: String
         if genreIDs.isEmpty {
@@ -176,18 +175,11 @@ struct MovieView: View {
         guard let url = URL(string: urlString) else { return [] }
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
-            
-            // 创建解码器
             let decoder = JSONDecoder()
-            // 告诉解码器如何处理命名不一致的问题（我之前漏掉了这句）
-            decoder.keyDecodingStrategy = .convertFromSnakeCase // <-- 补上这句关键代码
-            
-            // 现在可以正常解码了
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
             let response = try decoder.decode(MovieResponse.self, from: data)
-            
             return response.results.filter { !watchedIDs.contains($0.id) && $0.posterPath != nil }
         } catch {
-            // 在控制台打印详细的解码错误，方便以后调试
             print("🚨 TMDB 数据解析失败: \(error)")
             DispatchQueue.main.async { statusMessage = "加载失败: \(error.localizedDescription)" }
             return []
@@ -221,13 +213,9 @@ struct MovieView: View {
             let contents = try String(contentsOfFile: filepath, encoding: .utf8)
             let lines = contents.split(separator: "\n").dropFirst()
             var movies = [(title: String, year: String)]()
-            
             for line in lines {
                 let columns = line.split(separator: ",", maxSplits: 2).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                
-                // 1. 根据你的数据格式，将判断条件从 2 改为 3
                 if columns.count >= 3 {
-                    // 2. 根据你的要求，同步为从第2列和第3列获取数据
                     let title = columns[1]
                     let year = columns[2]
                     movies.append((title: title, year: year))
@@ -282,90 +270,7 @@ struct FlippableCardView: View {
     }
 }
 
-struct InfoRowView: View {
-    let icon: String
-    let label: String
-    let value: String
-    
-    var body: some View {
-        HStack(alignment: .top) {
-            Image(systemName: icon)
-                .font(.subheadline)
-                .frame(width: 25, alignment: .center)
-            
-            Text(label)
-                .font(.subheadline).bold()
-                .frame(width: 70, alignment: .leading)
-            
-            Text(value)
-                .font(.subheadline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-struct WatchedList {
-    private static let userDefaultsKey = "watchedMovieIDs"
-    static func getIDs() -> Set<Int> {
-        let defaults = UserDefaults.standard
-        let array = defaults.array(forKey: userDefaultsKey) as? [Int] ?? []
-        return Set(array)
-    }
-    static func add(movieID: Int) {
-        let defaults = UserDefaults.standard
-        var currentSet = getIDs()
-        currentSet.insert(movieID)
-        defaults.set(Array(currentSet), forKey: userDefaultsKey)
-    }
-    static func clear() {
-        print("🧹 正在清除所有‘我看过了’的记录...")
-        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
-    }
-}
-
-struct Movie: Identifiable, Codable {
-    let id: Int
-    let title: String
-    let posterPath: String?
-    var posterURL: URL? {
-        if let path = posterPath {
-            return URL(string: "https://image.tmdb.org/t/p/w500\(path)")
-        }
-        return nil
-    }
-}
-
-struct MovieResponse: Codable {
-    let results: [Movie]
-}
-
-struct MovieDetail: Identifiable, Codable {
-    let id: Int
-    let title: String
-    let overview: String?
-    let releaseDate: String?
-    let runtime: Int?
-    let tagline: String?
-    let voteAverage: Double? // 平均分
-    let voteCount: Int? // 评分人数
-    let productionCountries: [ProductionCountry]?
-    let credits: Credits
-}
-
-struct ProductionCountry: Identifiable, Codable {
-    var id: String { name }
-    let name: String
-}
-
-struct Credits: Codable {
-    let cast: [CastMember]
-}
-
-struct CastMember: Identifiable, Codable {
-    let id: Int
-    let name: String
-    let character: String?
-}
+// --- 3. 修改 CardFaceView，增加评分显示 <-- ---
 struct CardFaceView: View {
     let movie: Movie
     let detailedMovie: MovieDetail?
@@ -454,4 +359,88 @@ struct StarRatingView: View {
         }
         .font(.title3)
     }
+}
+
+struct InfoRowView: View {
+    let icon: String
+    let label: String
+    let value: String
+    
+    var body: some View {
+        HStack(alignment: .top) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .frame(width: 25, alignment: .center)
+            
+            Text(label)
+                .font(.subheadline).bold()
+                .frame(width: 70, alignment: .leading)
+            
+            Text(value)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+struct WatchedList {
+    private static let userDefaultsKey = "watchedMovieIDs"
+    static func getIDs() -> Set<Int> {
+        let defaults = UserDefaults.standard
+        let array = defaults.array(forKey: userDefaultsKey) as? [Int] ?? []
+        return Set(array)
+    }
+    static func add(movieID: Int) {
+        let defaults = UserDefaults.standard
+        var currentSet = getIDs()
+        currentSet.insert(movieID)
+        defaults.set(Array(currentSet), forKey: userDefaultsKey)
+    }
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+    }
+}
+
+struct Movie: Identifiable, Codable {
+    let id: Int
+    let title: String
+    let posterPath: String?
+    var posterURL: URL? {
+        if let path = posterPath {
+            return URL(string: "https://image.tmdb.org/t/p/w500\(path)")
+        }
+        return nil
+    }
+}
+
+struct MovieResponse: Codable {
+    let results: [Movie]
+}
+
+struct MovieDetail: Identifiable, Codable {
+    let id: Int
+    let title: String
+    let overview: String?
+    let releaseDate: String?
+    let runtime: Int?
+    let tagline: String?
+    let voteAverage: Double? // 平均分
+    let voteCount: Int? // 评分人数
+    let productionCountries: [ProductionCountry]?
+    let credits: Credits
+}
+
+struct ProductionCountry: Identifiable, Codable {
+    var id: String { name }
+    let name: String
+}
+
+struct Credits: Codable {
+    let cast: [CastMember]
+}
+
+struct CastMember: Identifiable, Codable {
+    let id: Int
+    let name: String
+    let character: String?
 }

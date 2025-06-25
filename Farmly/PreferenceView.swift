@@ -39,7 +39,7 @@ struct PreferenceView: View {
 
                         Divider().padding(.vertical)
                         
-                        Text("按类型筛选")
+                        Text("按类型筛选 (TMDB)")
                             .font(.title2).bold().frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal)
 
                         LazyVGrid(columns: columns, spacing: 20) {
@@ -55,9 +55,6 @@ struct PreferenceView: View {
                 Spacer()
 
                 Button(action: {
-                    // --- ✨ 在这里加入打印指令，追踪我们发送的数据 <-- ---
-                    print("🅿️ PreferenceView: 即将导航，发送的类型ID为: \(selectedGenreIDs)")
-                    
                     let genreSelection = RecommendationSource.tmdbGenres(ids: selectedGenreIDs)
                     path.append(genreSelection)
                 }) {

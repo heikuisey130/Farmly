@@ -12,7 +12,7 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        // 我们的App现在总是从偏好选择页开始
+        // App的唯一入口就是偏好选择页
         PreferenceView()
     }
 }
